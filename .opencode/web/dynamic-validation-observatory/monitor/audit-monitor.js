@@ -4,7 +4,7 @@ import './audit-monitor.css';
 
 // Keep child windows independent of task-detail mounts, isolated by browser window.
 const terminalWindows = new WeakMap();
-const STATES = { running: '执行中', pending: '等待中', completed: '工具已完成', error: '错误', failed: '失败', ended: '单步结束', success: '成功' };
+const STATES = { running: '执行中', pending: '等待中', completed: '工具已完成', error: '错误', failed: '失败', ended: '单步结束', success: '成功', compacted: '已折叠', recovering: '轮次恢复' };
 const time = value => value && Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleTimeString('zh-CN', { hour12: false }) : '—';
 
 // Preserve event selection and scroll state across task/SSE refreshes.
@@ -23,7 +23,8 @@ export function createAuditMonitor({ document, window, audit, renderOriginalEven
     const node = el('button', `monitor-button ${className}`, text); node.type = 'button'; node.addEventListener('click', action); return node;
   };
   let disposed = false, currentView = 'events', terminalUrl = '', terminalKey = '';
-  const popupId = `${serverUrl}|${audit.id}`;
+  const terminalDisabled = serverUrl === null || serverUrl === false || serverUrl === '';
+  const popupId = `${terminalDisabled ? 'disabled' : serverUrl}|${audit.id}`;
   if (!terminalWindows.has(window)) terminalWindows.set(window, new Map());
   const popups = terminalWindows.get(window);
   let following = true, syncingScroll = false, eventError = '', terminalError = '', downloadUrl;
@@ -38,6 +39,7 @@ export function createAuditMonitor({ document, window, audit, renderOriginalEven
   const controls = el('div', 'monitor-actions');
   const indicator = el('span', 'monitor-connection', 'JSON 事件监控'); indicator.setAttribute('role', 'status');
   const openTerminal = button('交互终端 ↗', openTerminalWindow, 'monitor-open-terminal');
+  if (terminalDisabled) { openTerminal.hidden = true; openTerminal.disabled = true; }
   const fallback = el('a', 'monitor-button monitor-popup-fallback', '在新标签页打开终端');
   fallback.target = '_blank'; fallback.rel = 'noopener noreferrer';
   const fullscreen = button('全屏', () => {
@@ -100,7 +102,10 @@ export function createAuditMonitor({ document, window, audit, renderOriginalEven
     }
     const card = el('article', `monitor-event monitor-${item.kind || 'raw'}`); card.dataset.eventKey = item.event_key;
     const head = el('header', 'monitor-event-head');
-    head.append(el('time', '', time(item.occurred_at)), el('span', 'monitor-agent', item.task_id || '主 Agent'), el('strong', '', item.label || '运行输出'));
+    head.append(el('time', '', time(item.occurred_at)), el('span', 'monitor-agent', item.task_id || '主 Agent'));
+    if (item.execution_revision && item.execution_revision > 1) head.append(el('span', 'monitor-revision', `R${item.execution_revision}`));
+    head.append(el('strong', '', item.label || '运行输出'));
+    if (item.truncated) head.append(el('span', 'monitor-truncated', `已截断${item.original_size ? ` (${item.original_size} B)` : ''}`));
     if (item.status) head.append(el('span', `monitor-event-state is-${item.status}`, STATES[item.status] || item.status));
     card.append(head);
     if (item.body) card.append(el('pre', 'monitor-event-output', item.body));
@@ -181,15 +186,16 @@ export function createAuditMonitor({ document, window, audit, renderOriginalEven
     summary.textContent = board ? `已交付 ${board.reported ?? board.done ?? 0} / ${board.total ?? 0} · 运行 ${board.running ?? 0} · 待执行 ${board.pending ?? 0}` : '';
     const source = next.terminal;
     const shared = source?.shared_server === true;
-    const active = source?.live && next.status === 'running';
+    const active = !terminalDisabled && source?.live && next.status === 'running';
     const key = active && shared ? `${serverUrl}|opencode:${next.id}|${source.server_generation || next.provider_session_id || ''}` : '';
     if (key !== terminalKey) terminalError = '';
     terminalKey = key; terminalUrl = '';
-    if (key) {
+    if (key && !terminalDisabled) {
       try { terminalUrl = buildAuditTerminalUrl({ serverUrl, auditId: next.id, generation: shared ? source.server_generation : undefined }); }
       catch { terminalError = '终端连接地址无效，请检查终端服务配置。'; }
     }
-    openTerminal.disabled = !terminalUrl;
+    openTerminal.hidden = terminalDisabled;
+    openTerminal.disabled = terminalDisabled || !terminalUrl;
     openTerminal.textContent = '交互终端 ↗';
     openTerminal.title = !terminalUrl
       ? '此任务没有运行中的终端。暂停或中断的任务请先恢复。'

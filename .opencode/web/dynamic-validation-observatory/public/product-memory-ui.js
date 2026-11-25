@@ -68,7 +68,8 @@ export function initProductMemoryUI({ state, api, element, table, status, toast,
   }
   function modal(title) {
     const dialog = element('dialog', 'memory-dialog'), article = element('article', 'report-dialog-body');
-    const head = element('div', 'dialog-heading'); head.append(element('h2', '', title), button('关闭', () => dialog.close())); article.append(head); dialog.append(article); document.body.append(dialog);
+    const head = element('div', 'dialog-heading'); head.append(element('h2', '', title), button('关闭', () => dialog.close())); article.append(head); dialog.append(article);
+    (document.body ?? document.querySelector?.('.app-shell')?.parentNode ?? document).append(dialog);
     dialog.addEventListener('close', () => dialog.remove(), { once: true }); dialog.showModal(); return { dialog, article };
   }
   async function openCampaign(selection) {
@@ -177,8 +178,8 @@ export function initProductMemoryUI({ state, api, element, table, status, toast,
     try { const issue = await api(`${prefix(productId)}/findings/${encodeURIComponent(finding.resource_id)}/memory`); if (seq === local.findingSequence && state.selectedFindingResourceId === finding.resource_id) renderIssue(container, issue, productId); }
     catch (error) { if (seq === local.findingSequence) container.replaceChildren(element('p', 'notice', `历史关联暂不可用：${error.message}`)); }
   }
-  const timer = setInterval(() => { if (state.view === 'projects' && !document.hidden) refresh().catch(() => {}); }, 7000);
-  const destroy = () => { clearInterval(timer); local.generation++; local.findingSequence++; window.removeEventListener?.('pagehide', destroy); };
+  const timer = window.setInterval(() => { if (state.view === 'projects' && !document.hidden) refresh().catch(() => {}); }, 7000);
+  const destroy = () => { window.clearInterval(timer); local.generation++; local.findingSequence++; window.removeEventListener?.('pagehide', destroy); };
   window.addEventListener('pagehide', destroy, { once: true });
   return { refresh, openFinding, label, destroy };
 }
