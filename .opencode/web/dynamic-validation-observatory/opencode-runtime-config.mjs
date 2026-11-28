@@ -57,11 +57,14 @@ export async function buildOpenCodeEnvironment(configPath, baseEnvironment = pro
       command: definition.command.map(value => commandPath(value, engineRoot)),
     };
   }
+  const stripSubagentDepth =
+    baseEnvironment?.OPENDEEPHOLE_STRIP_SUBAGENT_DEPTH === "1"
+    || baseEnvironment?.OPENCODE_STRIP_SUBAGENT_DEPTH === "1";
   return {
     ...baseEnvironment,
     OPENCODE_CONFIG: absoluteConfigPath,
     OPENCODE_CONFIG_DIR: configDirectory,
-    OPENCODE_CONFIG_CONTENT: JSON.stringify({ mcp, subagent_depth: 2 }),
+    OPENCODE_CONFIG_CONTENT: JSON.stringify(stripSubagentDepth ? { mcp } : { mcp, subagent_depth: 2 }),
     OPENCODE_DISABLE_PROJECT_CONFIG: "true",
   };
 }

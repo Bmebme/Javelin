@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { createServer as createNetServer } from 'node:net';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { writeFile, rename, rm } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -73,34 +74,95 @@ export async function startSharedRun(spec, { environment, output, spawnProcess =
   };
   try {
     await rm(connectionPath, { force: true });
-    server = start(['serve', '--hostname', '127.0.0.1', '--port', '0']);
-    const url = await new Promise((resolve, reject) => {
-      let buffer = '';
-      readyTimer = setTimeout(() => reject(new Error('OpenCode 服务启动超时。')), 30_000);
-      const failed = () => reject(new Error('OpenCode 服务在就绪前退出。'));
-      server.once('error', failed); server.once('close', failed);
-      server.stderr.on('data', () => {}); // Never copy server credentials/configuration into the public log.
-      server.stdout.on('data', chunk => {
-        buffer = (buffer + chunk).slice(-8192);
-        const match = buffer.match(/opencode server listening on (http:\/\/127\.0\.0\.1:(\d+))/);
-        if (match && Number(match[2]) > 0 && Number(match[2]) <= 65535) { clearTimeout(readyTimer); resolve(match[1]); }
+    const allocatePort = () => new Promise(resolve => {
+      const probe = createNetServer();
+      probe.unref();
+      probe.once('error', () => resolve(0));
+      probe.listen(0, '127.0.0.1', () => {
+        const addr = probe.address();
+        const port = typeof addr === 'object' && addr && addr.port > 0 ? addr.port : 0;
+        probe.close(() => resolve(port));
       });
     });
-    request = async (path, options = {}) => {
-      const response = await fetch(`${url}${path}${path.includes('?') ? '&' : '?'}directory=${encodeURIComponent(spec.cwd)}`, {
-        ...options, headers: { Authorization: `Basic ${Buffer.from(`opencode:${password}`).toString('base64')}`, 'Content-Type': 'application/json' },
-        signal: AbortSignal.timeout(30_000), redirect: 'error',
-      });
-      if (!response.ok) throw new Error(`OpenCode 会话连接失败（HTTP ${response.status}）。`);
-      return response.json();
+    const scrubDetail = value => {
+      let text = String(value ?? '').replace(/\s+/g, ' ').trim();
+      if (password) text = text.replaceAll(password, '[REDACTED]');
+      return text
+        .replace(/\bBearer\s+[A-Za-z0-9._~+\/-]+=*/gi, 'Bearer [REDACTED]')
+        .replace(/(["']?(?:api[_-]?key|apikey|token|secret|password|authorization|cookie)["']?\s*[:=]\s*["']?)[^\s,"']+/gi, '$1[REDACTED]')
+        .slice(0, 320);
     };
     const args = [...spec.args];
     const sessionIndex = args.indexOf('--session');
     const requestedId = sessionIndex >= 0 ? args[sessionIndex + 1] : null;
     const titleIndex = args.indexOf('--title');
-    const session = requestedId
-      ? await request(`/session/${encodeURIComponent(requestedId)}`)
-      : await request('/session', { method: 'POST', body: JSON.stringify({ title: titleIndex >= 0 ? args[titleIndex + 1] : spec.audit_id, permission: RUN_PERMISSIONS }) });
+    let url = '';
+    let session = null;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      let serverStderr = '';
+      const bindPort = await allocatePort();
+      server = start(['serve', '--hostname', '127.0.0.1', '--port', String(bindPort)]);
+      url = await new Promise((resolve, reject) => {
+        let buffer = '';
+        readyTimer = setTimeout(() => reject(new Error(`OpenCode 服务启动超时。${serverStderr ? ' stderr: ' + scrubDetail(serverStderr) : ''}`)), 30_000);
+        const failed = () => reject(new Error(`OpenCode 服务在就绪前退出。${serverStderr ? ' stderr: ' + scrubDetail(serverStderr) : ''}`));
+        server.once('error', failed); server.once('close', failed);
+        server.stderr.on('data', chunk => { serverStderr = (serverStderr + String(chunk)).slice(-2048); });
+        server.stdout.on('data', chunk => {
+          buffer = (buffer + chunk).slice(-8192);
+          const match = buffer.match(/opencode server listening on (http:\/\/127\.0\.0\.1:(\d+))/);
+          if (match && Number(match[2]) > 0 && Number(match[2]) <= 65535) { clearTimeout(readyTimer); resolve(match[1]); }
+        });
+      });
+      request = async (path, options = {}) => {
+        let response;
+        try {
+          response = await fetch(`${url}${path}${path.includes('?') ? '&' : '?'}directory=${encodeURIComponent(spec.cwd)}`, {
+            ...options, headers: { Authorization: `Basic ${Buffer.from(`opencode:${password}`).toString('base64')}`, 'Content-Type': 'application/json' },
+            signal: AbortSignal.timeout(30_000), redirect: 'error',
+          });
+        } catch (fetchErr) {
+          const tail = scrubDetail(serverStderr);
+          throw new Error(`${fetchErr.message}${tail ? ` (stderr: ${tail})` : ''}`);
+        }
+        if (!response.ok) {
+          const bodyText = scrubDetail(await response.text().catch(() => ''));
+          const stderrText = scrubDetail(serverStderr);
+          const detail = bodyText || stderrText;
+          const err = new Error(`OpenCode 会话连接失败（HTTP ${response.status}）${detail ? `：${detail}` : '。'}`);
+          err.statusCode = response.status;
+          err.detail = `${bodyText} ${stderrText}`.trim();
+          throw err;
+        }
+        return response.json();
+      };
+      try {
+        session = requestedId
+          ? await request(`/session/${encodeURIComponent(requestedId)}`)
+          : await request('/session', { method: 'POST', body: JSON.stringify({ title: titleIndex >= 0 ? args[titleIndex + 1] : spec.audit_id, permission: RUN_PERMISSIONS }) });
+        break;
+      } catch (err) {
+        const canStripSubagentDepth = attempt === 0 && !requestedId && err?.statusCode === 500
+          && /subagent_depth/i.test(String(err?.detail || err?.message || ''))
+          && typeof env.OPENCODE_CONFIG_CONTENT === 'string' && env.OPENCODE_CONFIG_CONTENT.includes('subagent_depth');
+        if (!canStripSubagentDepth) throw err;
+        try {
+          const parsed = JSON.parse(env.OPENCODE_CONFIG_CONTENT);
+          delete parsed.subagent_depth;
+          env.OPENCODE_CONFIG_CONTENT = JSON.stringify(parsed);
+        } catch {
+          throw err;
+        }
+        const deadServer = server;
+        children.delete(deadServer);
+        await new Promise(resolve => {
+          if (deadServer.exitCode !== null || deadServer.signalCode !== null) return resolve();
+          const t = setTimeout(() => { try { deadServer.kill('SIGKILL'); } catch {} resolve(); }, 1500);
+          deadServer.once('close', () => { clearTimeout(t); resolve(); });
+          try { deadServer.kill('SIGTERM'); } catch { clearTimeout(t); resolve(); }
+        });
+      }
+    }
     if (!/^ses_[A-Za-z0-9_-]+$/.test(session?.id ?? '') || requestedId && session.id !== requestedId) throw new Error('OpenCode 返回了不匹配的会话。');
     sessionId = session.id;
     if (stopping || server.exitCode !== null || server.signalCode !== null) throw new Error('OpenCode 服务已退出。');

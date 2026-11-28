@@ -73,6 +73,9 @@ function baseView(item) {
     call_id: identifier(item.call_id), part_id: identifier(item.part_id), event_id: identifier(item.event_id),
     event_type: string(item.event_type) || null, tool: string(item.tool) || null,
     sequence: Number.isSafeInteger(item.sequence) && item.sequence >= 0 ? item.sequence : null,
+    execution_revision: Number.isSafeInteger(item.execution_revision) && item.execution_revision >= 1 ? item.execution_revision : null,
+    truncated: Boolean(item.truncated),
+    original_size: number(item.original_size),
     usage: null, semantic_scope: item.kind === "tool" ? "tool" : "activity", parse_status: "preformatted", content_omitted: false,
   };
 }
@@ -80,6 +83,12 @@ function baseView(item) {
 function normalize(item) {
   let base = baseView(object(item));
   if (base.kind === "reasoning" || base.event_type === "reasoning") return hiddenReasoning(base);
+  if (base.event_type === "audit.logs.compacted" || base.kind === "compacted") {
+    return { ...base, kind: "compacted", label: string(item?.label) || "早期日志已逻辑折叠", status: "compacted", semantic_scope: "activity" };
+  }
+  if (base.event_type === "audit.recovery.divider" || base.kind === "recovery") {
+    return { ...base, kind: "recovery", label: string(item?.label) || "断点恢复轮次切换", status: "recovering", semantic_scope: "activity" };
+  }
   if (base.event_type === "step_finish") return { ...base, kind: "step", label: "单步结束", status: "ended", semantic_scope: "step" };
   if (base.event_type === "step_start") return { ...base, kind: "step", label: "单步开始", status: "running", semantic_scope: "step" };
   if (!["raw", "error"].includes(base.kind)) return base;

@@ -1962,7 +1962,11 @@ export class AuditRunner extends EventEmitter {
     if (audit.task_protocol === TASK_BOARD_PROTOCOL) configureTaskReviewPermissions(focusConfig, { workspaceRoot: paths.workspace_root, reportsRoot: paths.reports_root });
     // Explicit loading also covers OPENCODE_DISABLE_PROJECT_CONFIG=true.
     const configuredPlugins = JSON.parse(await readFile(repository.config_path, "utf8")).plugin ?? [];
-    focusConfig.plugin = [...configuredPlugins.map(plugin => typeof plugin === 'string' && plugin.startsWith('.') ? pathToFileURL(resolve(dirname(repository.config_path), plugin)).href : plugin), new URL("../../lib/focus-area-watchdog-plugin.mjs", import.meta.url).href];
+    // Under task-board.v1, AUDIT_TODO_PATH is empty so focus-area-watchdog-plugin is a no-op;
+    // omitting it when no explicit plugin is configured avoids triggering OpenCode plugin dependency install on /session.
+    focusConfig.plugin = (audit.task_protocol === TASK_BOARD_PROTOCOL && configuredPlugins.length === 0)
+      ? []
+      : [...configuredPlugins.map(plugin => typeof plugin === 'string' && plugin.startsWith('.') ? pathToFileURL(resolve(dirname(repository.config_path), plugin)).href : plugin), new URL("../../lib/focus-area-watchdog-plugin.mjs", import.meta.url).href];
     environment.OPENCODE_CONFIG_CONTENT = JSON.stringify(focusConfig);
     await this.redactionsForAudit(audit);
     const prompt = resume ? recoveryPrompt(audit, repository, paths, contextPaths) : auditPrompt(audit, repository, paths, contextPaths);
